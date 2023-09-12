@@ -4,3 +4,4 @@ services:
     image: gurobi-app
     volumes:
       - ./gurobi.lic:/opt/gurobi/gurobi.lic:ro
+      - ./graphs:/app/graphs
