@@ -6,6 +6,10 @@ from gurobipy import GRB
 import matplotlib.pyplot as plt
 import numpy as np
 
+# global variables
+buyer_file = "./data/test1-PreparedBuyerData.csv"
+seller_file = "./data/test1-PreparedSellerData.csv"
+
 
 
 # All keys of beta_b_bid_t_mw_mwsegm as numbers not string representation
@@ -89,9 +93,9 @@ def optimize(u_at_opt = None):
             # Added: the start-up costs of all sellers that are comitted and started up
             gp.quicksum(
                 # start_up_costs [$/start] (start up price)
-                seller_asset_start_up_price[(asset, t)] *
+                seller_a_start_up_price[(asset, t)] *
                 # phi_st [start] (start up indicator)
-                phi_at[asset, t] for (asset, t) in seller_asset_start_up_price)
+                phi_at[asset, t] for (asset, t) in seller_a_start_up_price)
             , GRB.MAXIMIZE
         )
 
@@ -141,25 +145,29 @@ def optimize(u_at_opt = None):
         print("after fourth constraint")
         # constraint 5:
         # power of seller s in period t for bid l is less than the maximum power possible for this bid
-        # y_stl - q_stl * u_st <= 0s
+        # y_atl - q_atl * u_at <= 0s
         gurobi_model.addConstrs(y_atl[(s, a, t, mw, mw_set)] - mw * u_at[a, t] <= 0 for (s, a, t, mw, mw_set) in beta_s_a_t_mw_mwsegm)
+
 
 
         print("after fifth constraint")
 
         # constraint 6:
-        # y_st - (sum of y_stl  with same s and t) == 0
+        # y_a - (sum of y_stl  with same s and t) == 0
         # gurobi_model.addConstrs(y_st[s, t] - gp.quicksum(y_stl[l] for l in beta_s_a_t_mw_mwsegm if l[3] == s and l[2] == t) == 0 for s in seller_id_list for t in periods)
         gurobi_model.addConstrs((y_at[asset, time] == 
                                  gp.quicksum(y_atl[(seller, a, time, m, ms)] for (s, a, t, m, ms) in beta_s_a_t_mw_mwsegm if a == asset and t == time )) 
                             for (seller, asset, time, mw, mw_set) in beta_s_a_t_mw_mwsegm)
+        # added constraint
+        
+
 
         print("after sixth constraint")
 
         # constraint 7:
         # y_st - must_run_power of period * comitted >= 0
         # power production by seller s in period t - must_run_power of seller s in period t * comittment of seller s in period t >= 0
-        gurobi_model.addConstrs( (y_at[a, t] - seller_asset_must_run_power_in_t[(a, t)] * u_at[a, t] >= 0 ) for (a, t) in seller_asset_must_run_power_in_t)
+        gurobi_model.addConstrs( (y_at[a, t] - seller_a_must_run_p_in_t[(a, t)] * u_at[a, t] >= 0 ) for (a, t) in seller_a_must_run_p_in_t)
         
         '''
         # Do, when there are bids with must-run-power
@@ -174,7 +182,7 @@ def optimize(u_at_opt = None):
         # constraint 8:
         # y_stl - u_st * P_st <= 0
         # power production by offer l - comittment of seller s * maximum power production of seller s in period t <= 0
-        gurobi_model.addConstrs( (y_atl[(s, a, t, mw, mw_segm)] - u_at[a, t] * seller_asset_max_power_in_t[(a, t)] <= 0 )
+        gurobi_model.addConstrs( (y_atl[(s, a, t, mw, mw_segm)] - u_at[a, t] * seller_a_max_p_in_t[(a, t)] <= 0 )
                                 for (s, a, t, mw, mw_segm) in beta_s_a_t_mw_mwsegm
         )
 
@@ -196,8 +204,9 @@ def optimize(u_at_opt = None):
 
         # constraint 13:
         # production is equal to consumption in every period
-        gurobi_model.addConstrs(((gp.quicksum(x_bt[buyer, t] for buyer in buyer_id_list) == gp.quicksum(y_at[asset, p] for (s, asset, p, mw, mwseg) in beta_s_a_t_mw_mwsegm if p == t)) for t in periods), name = "demand_supply_balance")
-
+        gurobi_model.addConstrs(((gp.quicksum(x_bt[buyer, t] for buyer in buyer_id_list) == gp.quicksum(y_at[asset, t] for asset in seller_asset_id_list)) for t in periods), name = "demand_supply_balance")
+        
+        # gurobi_model.addConstrs(y_at[a, t] <= y_at[a,t] * u_at[a, t] for a in seller_asset_id_list for t in periods)
 
 
         # process any pending model modifications
@@ -318,34 +327,35 @@ def optimize(u_at_opt = None):
     
 
 def read_csv_data():
-    # READ THE DATA FROM SELLERS FILE
-    # read data from the csv energy offers file, and skip the first 6 rows (header)
-    global seller_data
-    # seller_data = pd.read_csv("./data/PreparedSellerData.csv", sep=";", skiprows=4)
-    seller_data = pd.read_csv("./data/test3-PreparedSellerData.csv", sep=";", skiprows=4)
+    
+    read_and_prepare_buyer_csv()   
 
-    # remove the first row and the last row (unit of every entry and number of all offers)
-    seller_data = seller_data.iloc[1:-1, :]
+    read_and_prepare_seller_csv()
 
-    seller_data["Masked Lead Participant ID"] = seller_data["Masked Lead Participant ID"].astype(int)
-    seller_data["Masked Asset ID"] = seller_data["Masked Asset ID"].astype(int)
-    seller_data["Trading Interval"] = seller_data["Trading Interval"].astype(int)
+    power = 0
+    # get the load one can buy for 0 $ in the first period
+    for (sel, asset, t, mw, mwsegm) in beta_s_a_t_mw_mwsegm:
+        if (t == 1 and beta_s_a_t_mw_mwsegm[(sel, asset, t, mw, mwsegm)] <= 0):
+            power += mw
 
-    # create a list of all the sellers (soller_ids)
-    global seller_id_list
-    seller_id_list = seller_data["Masked Lead Participant ID"].unique().tolist()
-    seller_id_list = sorted(set([int(x) for x in seller_id_list]))
+    # sum up fixed load in period 1
+    consumption = 0
+    for bid in buyer_data[(buyer_data['Bid Type'] == "FIXED") & (buyer_data['Hour'] == 1)].iterrows():
+        consumption += float(bid[1]["Segment 1 MW"])
 
-    global seller_asset_id_list
-    seller_asset_id_list = seller_data["Masked Asset ID"].unique().tolist()
-    seller_asset_id_list = sorted(set([int(x) for x in seller_asset_id_list]))
+    
+    print()
+    print("Power for 0 or smaller amount of money: " + str(power))
+    print("Fixed Consumption " + str(consumption))
+    print() 
 
 
+def read_and_prepare_buyer_csv():
     # READ THE DATA FROM BUYERS FILEs
     # read data from the csv energy buyer file, and skip the first 4 rows (header)
     global buyer_data
     # buyer_data = pd.read_csv("./data/PreparedBuyerData.csv", sep=";", skiprows=4)
-    buyer_data = pd.read_csv("./data/test3-PreparedBuyerData.csv", sep=";", skiprows=4)
+    buyer_data = pd.read_csv(buyer_file, sep=";", skiprows=4)
     buyer_data = buyer_data.dropna(axis=1, how='all')
 
     # remove the first row and the last row (unit of every entry and number of all offers)
@@ -403,49 +413,60 @@ def read_csv_data():
             buyer_max_power_in_t[(int(buyer_bid[1]["Masked Lead Participant ID"]), int(buyer_bid[1]["Hour"]))] += float(buyer_bid[1]["Segment " + str(mw_segment) + " MW"])
 
 
+def read_and_prepare_seller_csv():
+    
+    # READ THE DATA FROM SELLERS FILE
+    # read data from the csv energy offers file, and skip the first 6 rows (header)
+    global seller_data
+    # seller_data = pd.read_csv("./data/PreparedSellerData.csv", sep=";", skiprows=4)
+    seller_data = pd.read_csv(seller_file, sep=";", skiprows=4)
 
+    # remove the first row and the last row (unit of every entry and number of all offers)
+    seller_data = seller_data.iloc[1:-1, :]
 
+    seller_data["Masked Lead Participant ID"] = seller_data["Masked Lead Participant ID"].astype(int)
+    seller_data["Masked Asset ID"] = seller_data["Masked Asset ID"].astype(int)
+    seller_data["Trading Interval"] = seller_data["Trading Interval"].astype(int)
 
+    # create a list of all the sellers (soller_ids)
+    global seller_id_list
+    seller_id_list = seller_data["Masked Lead Participant ID"].unique().tolist()
+    seller_id_list = sorted(set([int(x) for x in seller_id_list]))
+
+    global seller_asset_id_list
+    seller_asset_id_list = seller_data["Masked Asset ID"].unique().tolist()
+    seller_asset_id_list = sorted(set([int(x) for x in seller_asset_id_list]))
 
     # find all maximum powers of the sellers in the specific period
-    global seller_asset_max_power_in_t
-    seller_asset_max_power_in_t = dict()
-    # and the maximum power of the specific bid of a seller in the specific period (sum up all mw segments of the specific bid-row)
-    # seller_max_power_in_bid_in_t = dict()
-    # and the must_run_powers of the seller of the specific bid
-    global seller_must_run_power_in_bid_in_t
-    seller_must_run_power_in_bid_in_t = dict()
+    global seller_a_max_p_in_t
+    seller_a_max_p_in_t = dict()
     # and all must_run_powers of the sellers in the specific period (sum up all must_run_powers of the sellers in the specific period)
-    global seller_asset_must_run_power_in_t
-    seller_asset_must_run_power_in_t = dict()
+    global seller_a_must_run_p_in_t
+    seller_a_must_run_p_in_t = dict()
     # and the start-up-price of the asset in the specific period
-    global seller_asset_start_up_price
-    seller_asset_start_up_price = dict()
-    for seller_offer in seller_data.iterrows():
+    global seller_a_start_up_price
+    seller_a_start_up_price = dict()
+    for s_offer in seller_data.iterrows():
         #1 maximum power
         # if not in dict jet
-        if(seller_asset_max_power_in_t.get( (seller_offer[1]["Masked Asset ID"], int(seller_offer[1]["Trading Interval"])) ) == None):
-            seller_asset_max_power_in_t[( seller_offer[1]["Masked Asset ID"], int(seller_offer[1]["Trading Interval"]) )] = 0
+        if(seller_a_max_p_in_t.get( (s_offer[1]["Masked Asset ID"], int(s_offer[1]["Trading Interval"])) ) == None):
+            seller_a_max_p_in_t[( s_offer[1]["Masked Asset ID"], int(s_offer[1]["Trading Interval"]) )] = 0
         # go through all MW segments of the offer 
         for mw_segment in range(1, 11):
-            if(pd.isna(seller_offer[1]["Segment " + str(mw_segment) + " MW"])):
+            if(pd.isna(s_offer[1]["Segment " + str(mw_segment) + " MW"])):
                 break
-            seller_asset_max_power_in_t[(int(seller_offer[1]["Masked Asset ID"]), int(seller_offer[1]["Trading Interval"]))] += float(seller_offer[1]["Segment " + str(mw_segment) + " MW"])
+            seller_a_max_p_in_t[(int(s_offer[1]["Masked Asset ID"]), int(s_offer[1]["Trading Interval"]))] += float(s_offer[1]["Segment " + str(mw_segment) + " MW"])
         #2 start-up-price
-        seller_asset_start_up_price[(seller_offer[1]["Masked Asset ID"], int(seller_offer[1]["Trading Interval"]))] = float(seller_offer[1]["Cold Startup Price"])
+        seller_a_start_up_price[(s_offer[1]["Masked Asset ID"], int(s_offer[1]["Trading Interval"]))] = float(s_offer[1]["Cold Startup Price"])
 
-        #3 must_run_power of the specific bid
-        seller_must_run_power_in_bid_in_t[(int(seller_offer[1]["Masked Lead Participant ID"]), int(seller_offer[1]["Masked Asset ID"]), int(seller_offer[1]["Trading Interval"]))] = float(seller_offer[1]["Must Take Energy"])
-
-        #4 must_run_power of the seller in the specific period
+        #3 must_run_power of the seller in the specific period
         # if not in dict jet
-        if(seller_asset_must_run_power_in_t.get( (seller_offer[1]["Masked Asset ID"], int(seller_offer[1]["Trading Interval"])) ) == None):
-            seller_asset_must_run_power_in_t[(seller_offer[1]["Masked Asset ID"], int(seller_offer[1]["Trading Interval"]) )] = 0
+        if(seller_a_must_run_p_in_t.get( (s_offer[1]["Masked Asset ID"], int(s_offer[1]["Trading Interval"])) ) == None):
+            seller_a_must_run_p_in_t[(s_offer[1]["Masked Asset ID"], int(s_offer[1]["Trading Interval"]) )] = 0
         # only sum up if MUST_RUN
-        if(seller_offer[1]["Unit Status"] == "MUST_RUN"):
-            seller_asset_must_run_power_in_t[(seller_offer[1]["Masked Asset ID"], int(seller_offer[1]["Trading Interval"]))] += float(seller_offer[1]["Must Take Energy"])
+        if(s_offer[1]["Unit Status"] == "MUST_RUN"):
+            seller_a_must_run_p_in_t[(s_offer[1]["Masked Asset ID"], int(s_offer[1]["Trading Interval"]))] += float(s_offer[1]["Must Take Energy"])
 
-    
     # Create the beta_s_t_mw_mwsegm
     global beta_s_a_t_mw_mwsegm
     beta_s_a_t_mw_mwsegm = dict()
@@ -463,27 +484,6 @@ def read_csv_data():
                     beta_s_a_t_mw_mwsegm[(s, int(offer[1]["Masked Asset ID"]), t, float(offer[1]["Segment " + str(mw_segment) + " MW"]), mw_segment)] =  float(offer[1]["Segment " + str(mw_segment) + " Price"])
 
 
-    power = 0
-    # get the load one can buy for 0 $ in the first period
-    for (sel, asset, t, mw, mwsegm) in beta_s_a_t_mw_mwsegm:
-        if (t == 1 and beta_s_a_t_mw_mwsegm[(sel, asset, t, mw, mwsegm)] <= 0):
-            power += mw
-
-    # sum up fixed load in period 1
-    consumption = 0
-    for bid in buyer_data[(buyer_data['Bid Type'] == "FIXED") & (buyer_data['Hour'] == 1)].iterrows():
-        consumption += float(bid[1]["Segment 1 MW"])
-
-    
-    print()
-    print("Power for 0 or smaller amount of money: " + str(power))
-    print("Fixed Consumption " + str(consumption))
-    print()
-        
-
-    return 
-    # print("Selling Data read:")
-    # print(beta_s_a_t_mw_mwsegm)
 
 # Start the main app
 if __name__ == "__main__":
