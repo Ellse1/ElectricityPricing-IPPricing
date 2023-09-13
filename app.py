@@ -7,8 +7,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 # global variables
-buyer_file = "./data/test1-PreparedBuyerData.csv"
-seller_file = "./data/test1-PreparedSellerData.csv"
+buyer_file = "./data/PreparedBuyerData.csv"
+seller_file = "./data/PreparedSellerData.csv"
 
 
 
@@ -89,6 +89,11 @@ def optimize(u_at_opt = None):
                 u_at[a, t]
     	        for a, t, no_load_cost in seller_data[["Masked Asset ID", "Trading Interval", "No Load Price"]].itertuples(index=False)
             )
+            , GRB.MAXIMIZE
+        )
+
+
+        '''
             -
             # Added: the start-up costs of all sellers that are comitted and started up
             gp.quicksum(
@@ -96,9 +101,7 @@ def optimize(u_at_opt = None):
                 seller_a_start_up_price[(asset, t)] *
                 # phi_st [start] (start up indicator)
                 phi_at[asset, t] for (asset, t) in seller_a_start_up_price)
-            , GRB.MAXIMIZE
-        )
-
+        '''
 
         print("after objective function")
         # Process any pending model modifications. 
@@ -148,6 +151,8 @@ def optimize(u_at_opt = None):
         # y_atl - q_atl * u_at <= 0s
         gurobi_model.addConstrs(y_atl[(s, a, t, mw, mw_set)] - mw * u_at[a, t] <= 0 for (s, a, t, mw, mw_set) in beta_s_a_t_mw_mwsegm)
 
+        # added constraint for missing offers in some periods -> y_at = 0 if there is no offer in this period
+        gurobi_model.addConstrs(y_at[a, t] == 0 for (a, t) in missing_offers)
 
 
         print("after fifth constraint")
@@ -238,8 +243,8 @@ def optimize(u_at_opt = None):
         # print variables and shadow prices
         # this is the very end status, when the optimising was successful and shaddow prices are available
         elif (status == GRB.OPTIMAL and u_at_opt != None):
-            for v in gurobi_model.getVars():
-                print('%s %g' % (v.VarName, v.X))
+            '''for v in gurobi_model.getVars():
+                print('%s %g' % (v.VarName, v.X))'''
             
             print("Optimal objective: %g" % gurobi_model.objVal)
             print()
@@ -470,19 +475,27 @@ def read_and_prepare_seller_csv():
     # Create the beta_s_t_mw_mwsegm
     global beta_s_a_t_mw_mwsegm
     beta_s_a_t_mw_mwsegm = dict()
+
+    # save the missing offer (some assets have only offers in some periods but not in all 24)
+    global missing_offers
+    missing_offers = []
     
     # go through the 24 periods
     for t in periods:
         # go through all sellers
-        for s in seller_id_list:
+        for a in seller_asset_id_list:
             # go through all offers of the seller in this period (with ECONMIC BID TYPE (Unit status)) 
-            for offer in seller_data[(seller_data["Masked Lead Participant ID"] == s) & (seller_data["Trading Interval"] == t)].iterrows():
+            count_of_offers = 0
+            for offer in seller_data[(seller_data["Masked Asset ID"] == a) & (seller_data["Trading Interval"] == t)].iterrows():
                 # go through every MW step of this offer (there can be 10 MW steps)
                 for mw_segment in range(1, 11):
                     if(pd.isna(offer[1]["Segment " + str(mw_segment) + " MW"])):
                         break
-                    beta_s_a_t_mw_mwsegm[(s, int(offer[1]["Masked Asset ID"]), t, float(offer[1]["Segment " + str(mw_segment) + " MW"]), mw_segment)] =  float(offer[1]["Segment " + str(mw_segment) + " Price"])
-
+                    beta_s_a_t_mw_mwsegm[(int(offer[1]["Masked Lead Participant ID"]), a, t, float(offer[1]["Segment " + str(mw_segment) + " MW"]), mw_segment)] =  float(offer[1]["Segment " + str(mw_segment) + " Price"])
+                    count_of_offers += 1
+            if(count_of_offers == 0):
+                print("No offers for asset " + str(a) + " in period " + str(t))
+                missing_offers.append((a, t))
 
 
 # Start the main app
