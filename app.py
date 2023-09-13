@@ -23,6 +23,7 @@ def optimize(u_at_opt = None):
     try:
         
         # Create a new model
+        global gurobi_model
         gurobi_model = gp.Model("mip1")
         
         # add gurobi variables
@@ -38,6 +39,7 @@ def optimize(u_at_opt = None):
         # variables for each asset, for each period (how much power is the seller selling in this period), continous, lb = 0
         y_at = gurobi_model.addVars(seller_asset_id_list, periods, lb=0, vtype=GRB.CONTINUOUS, name='y_at')
         # variables for each seller, for each period, for each offer (specific offer with MW and price)
+        global y_atl
         y_atl = dict()
         for l in beta_s_a_t_mw_mwsegm.keys():
             y_atl[l] = gurobi_model.addVar(lb=0, vtype = GRB.CONTINUOUS, name='y_atl')
@@ -51,6 +53,7 @@ def optimize(u_at_opt = None):
             gurobi_model.addConstrs(u_at[a, t] == u_at_opt[a, t] for a in seller_asset_id_list for t in periods)
 
         # start-up indicator as written in the example code: gurobi_dcopf.py 
+        global phi_at
         phi_at = gurobi_model.addVars(seller_asset_id_list, periods, lb=0, ub=GRB.INFINITY, name='phi_at')
 
         # voltage angle alpha_vt and flow on the line connection f_vwt (as described in the example code: gurobi_dcopf.py) 
@@ -103,7 +106,6 @@ def optimize(u_at_opt = None):
                 phi_at[asset, t] for (asset, t) in seller_a_start_up_price)
         '''
 
-        print("after objective function")
         # Process any pending model modifications. 
         gurobi_model.update()
 
@@ -114,8 +116,6 @@ def optimize(u_at_opt = None):
         gurobi_model.addConstrs(x_btl[l] >= 0 for l in beta_b_bid_t_mw_mwsegm)
         # each power_consumption of a buyer is smaller or equal to the possible maximum power_consumption of the buyer in the specific mw segment
         gurobi_model.addConstrs(x_btl[(buyer, bid_id, t, mw, mw_segm)] <= mw for (buyer, bid_id, t, mw, mw_segm) in beta_b_bid_t_mw_mwsegm)
-
-        print("after first constraint")
 
         # constraint 2:
         # power of buyer b in period t - optional power = fixed power of buyer b in period t 
@@ -134,18 +134,14 @@ def optimize(u_at_opt = None):
         # power of buyer b in period t is >= fixed power of buyer b in period t
         gurobi_model.addConstrs(x_bt[buyer, t] >= buyer_fixed_power_in_t[(buyer, t)] for buyer in buyer_id_list for t in periods)
         
-        print("after second constraint")
-
         # constraint 3:
         # x_bt is smaller than max Power in this period
         # x_bt is smaller than sum of all power segments of all bids of the buyer in the specific period
         gurobi_model.addConstrs(x_bt[buyer, t] <= buyer_max_power_in_t[(buyer, t)] for buyer in buyer_id_list for t in periods)        
 
-        print("after third constraint")
         # constraint 4:
         gurobi_model.addConstrs(y_atl[l] >= 0 for l in beta_s_a_t_mw_mwsegm)
 
-        print("after fourth constraint")
         # constraint 5:
         # power of seller s in period t for bid l is less than the maximum power possible for this bid
         # y_atl - q_atl * u_at <= 0s
@@ -155,7 +151,6 @@ def optimize(u_at_opt = None):
         gurobi_model.addConstrs(y_at[a, t] == 0 for (a, t) in missing_offers)
 
 
-        print("after fifth constraint")
 
         # constraint 6:
         # y_a - (sum of y_stl  with same s and t) == 0
@@ -163,11 +158,7 @@ def optimize(u_at_opt = None):
         gurobi_model.addConstrs((y_at[asset, time] == 
                                  gp.quicksum(y_atl[(seller, a, time, m, ms)] for (s, a, t, m, ms) in beta_s_a_t_mw_mwsegm if a == asset and t == time )) 
                             for (seller, asset, time, mw, mw_set) in beta_s_a_t_mw_mwsegm)
-        # added constraint
         
-
-
-        print("after sixth constraint")
 
         # constraint 7:
         # y_st - must_run_power of period * comitted >= 0
@@ -182,7 +173,6 @@ def optimize(u_at_opt = None):
         ) >= seller_must_run_power_in_bid_in_t[(seller, asset, t)] for (seller, asset, t) in seller_must_run_power_in_bid_in_t)
         '''
 
-        print("after seventh constraint")
 
         # constraint 8:
         # y_stl - u_st * P_st <= 0
@@ -191,7 +181,6 @@ def optimize(u_at_opt = None):
                                 for (s, a, t, mw, mw_segm) in beta_s_a_t_mw_mwsegm
         )
 
-        print("after eigth constraint")
 
         # - constraint 9:
         # phi_st - u_st + u_{st-1} >= 0
@@ -200,7 +189,6 @@ def optimize(u_at_opt = None):
         # add constraint for the first period
         gurobi_model.addConstrs(phi_at[a, 1] == u_at[a, 1] for a in seller_asset_id_list)
 
-        print("after ninth constraint")
 
         # constraint 10:
         # changed: not uptime but maximum-daily-energy is restricted for each bid
@@ -224,8 +212,8 @@ def optimize(u_at_opt = None):
         #    print('%s %g' % (v.VarName, v.X))
 
         status = gurobi_model.getAttr('Status')
-        print("Status: " + str(status))
-        print("u_at_opt equals none? " + str(u_at_opt == None))
+
+        # if optimal solution found but this was only the first run -> make second run (pricing run)
         if (status == 2 and u_at_opt == None):
             print("Ready for second run")
             # do the optimization again without binary variables
@@ -240,73 +228,10 @@ def optimize(u_at_opt = None):
             # recursive call
             optimize(u_at_opt)
         
-        # print variables and shadow prices
+        # if this was already the second run -> show shadow prices and cacluation some values from optimal solutions
         # this is the very end status, when the optimising was successful and shaddow prices are available
         elif (status == GRB.OPTIMAL and u_at_opt != None):
-            '''for v in gurobi_model.getVars():
-                print('%s %g' % (v.VarName, v.X))'''
-            
-            print("Optimal objective: %g" % gurobi_model.objVal)
-            print()
-            # print("Shadow prices:")
-            shadow_prices = dict()
-            for p in periods:
-                c_p = gurobi_model.getConstrByName(f'demand_supply_balance[{p}]')
-                # get shadow prices for each node for each period
-                shadow_prices[p] = c_p.Pi
-                print(f"Period {p} price: {shadow_prices[p]}")
-            
-            # store all the important data in data dicts
-            # store for every asset_id, for every period: (energy produced, asked_earnings, shadow_price_based_earnings, loss_or_earning)
-            seller_asset_energy_produced = dict()
-            seller_asset_asked_earnings = dict()
-            seller_asset_price_based_earnings = dict()
-            seller_asset_start_up_costs = dict()
-            #start up indicator to calculate than the start up costs
-            asset_startup_indicator = dict()
-
-            for p in periods:
-                for asset_id in seller_asset_id_list:
-                    for (s, a, t, mw, mwseg) in beta_s_a_t_mw_mwsegm:
-                        if(a == asset_id and t == p):
-                            # energy produced
-                            if(seller_asset_energy_produced.get((asset_id, p)) == None):
-                                seller_asset_energy_produced[(asset_id, p)] = 0
-                            seller_asset_energy_produced[(asset_id, p)] += y_atl[(s, a, t, mw, mwseg)].X
-                            # asked_earnings
-                            if(seller_asset_asked_earnings.get((asset_id, p)) == None):
-                                seller_asset_asked_earnings[(asset_id, p)] = 0.0 
-                            seller_asset_asked_earnings[(asset_id, p)] += y_atl[(s, a, t, mw, mwseg)].X * float(beta_s_a_t_mw_mwsegm[(s, a, t, mw, mwseg)])
-                            # price based earnings
-                            if(seller_asset_price_based_earnings.get((asset_id, p)) == None):
-                                seller_asset_price_based_earnings[(asset_id, p)] = 0.0
-                            seller_asset_price_based_earnings[(asset_id, p)] += y_atl[(s, a, t, mw, mwseg)].X * float(shadow_prices[p])
-                                    
-
-
-                    # fill the startup indicator for the asset
-                    asset_startup_indicator[(asset_id, p)] = phi_at[asset_id, p].X       
-
-                    # start up costs
-                    if(seller_asset_start_up_costs.get((asset_id, p)) == None):
-                        seller_asset_start_up_costs[(asset_id, p)] = 0.0
-                    try:    
-                        start_up_price = seller_data.loc[(seller_data["Masked Asset ID"] == asset_id) & (seller_data["Trading Interval"] == p)].iloc[0].get("Cold Startup Price")
-                        seller_asset_start_up_costs[(asset_id, p)] = float(start_up_price) * float(asset_startup_indicator[(asset_id, p)])
-                    # could be, that for one asset one period is not defined... 
-                    except Exception:
-                        start_up_price = 0.0
-                        seller_asset_start_up_costs[(asset_id, p)] = 0.0
-                        print("one exception for asset_id: " + str(asset_id) + " and period: " + str(p))
-                    
-            
-            print("Optimization finished")
-            #print(seller_asset_energy_produced)
-            #print(seller_asset_asked_earnings)
-            #print(seller_asset_price_based_earnings)
-            
-            # print(asset_startup_indicator)
-            # print(seller_asset_start_up_costs)
+            optimal_solution_found()
 
         # dispose the model and the environment (to create new one in recursive call)
         gurobi_model.dispose()
@@ -336,23 +261,6 @@ def read_csv_data():
     read_and_prepare_buyer_csv()   
 
     read_and_prepare_seller_csv()
-
-    power = 0
-    # get the load one can buy for 0 $ in the first period
-    for (sel, asset, t, mw, mwsegm) in beta_s_a_t_mw_mwsegm:
-        if (t == 1 and beta_s_a_t_mw_mwsegm[(sel, asset, t, mw, mwsegm)] <= 0):
-            power += mw
-
-    # sum up fixed load in period 1
-    consumption = 0
-    for bid in buyer_data[(buyer_data['Bid Type'] == "FIXED") & (buyer_data['Hour'] == 1)].iterrows():
-        consumption += float(bid[1]["Segment 1 MW"])
-
-    
-    print()
-    print("Power for 0 or smaller amount of money: " + str(power))
-    print("Fixed Consumption " + str(consumption))
-    print() 
 
 
 def read_and_prepare_buyer_csv():
@@ -496,6 +404,79 @@ def read_and_prepare_seller_csv():
             if(count_of_offers == 0):
                 print("No offers for asset " + str(a) + " in period " + str(t))
                 missing_offers.append((a, t))
+
+# calculate shadow prices and different values from optimal solution 
+def optimal_solution_found():
+    '''for v in gurobi_model.getVars():
+        print('%s %g' % (v.VarName, v.X))'''
+    
+    print("Optimal objective: %g" % gurobi_model.objVal)
+    print()
+    # print("Shadow prices:")
+    shadow_prices = dict()
+    for p in periods:
+        c_p = gurobi_model.getConstrByName(f'demand_supply_balance[{p}]')
+        # get shadow prices for each node for each period
+        shadow_prices[p] = c_p.Pi
+        print(f"Period {p} price: {shadow_prices[p]}")
+    
+    # store all the important data in data dicts
+    # store for every asset_id, for every period: (energy produced, asked_earnings, shadow_price_based_earnings, loss_or_earning)
+    seller_asset_energy_produced = dict()
+    seller_asset_asked_earnings = dict()
+    seller_asset_price_based_earnings = dict()
+    seller_asset_start_up_costs = dict()
+    #start up indicator to calculate than the start up costs
+    asset_startup_indicator = dict()
+
+    for p in periods:
+        for asset_id in seller_asset_id_list:
+            for (s, a, t, mw, mwseg) in beta_s_a_t_mw_mwsegm:
+                if(a == asset_id and t == p):
+                    # energy produced
+                    if(seller_asset_energy_produced.get((asset_id, p)) == None):
+                        seller_asset_energy_produced[(asset_id, p)] = 0
+                    seller_asset_energy_produced[(asset_id, p)] += y_atl[(s, a, t, mw, mwseg)].X
+                    # asked_earnings
+                    if(seller_asset_asked_earnings.get((asset_id, p)) == None):
+                        seller_asset_asked_earnings[(asset_id, p)] = 0.0 
+                    seller_asset_asked_earnings[(asset_id, p)] += y_atl[(s, a, t, mw, mwseg)].X * float(beta_s_a_t_mw_mwsegm[(s, a, t, mw, mwseg)])
+                    # price based earnings
+                    if(seller_asset_price_based_earnings.get((asset_id, p)) == None):
+                        seller_asset_price_based_earnings[(asset_id, p)] = 0.0
+                    seller_asset_price_based_earnings[(asset_id, p)] += y_atl[(s, a, t, mw, mwseg)].X * float(shadow_prices[p])
+                            
+
+
+            # fill the startup indicator for the asset
+            asset_startup_indicator[(asset_id, p)] = phi_at[asset_id, p].X       
+
+            # start up costs
+            if(seller_asset_start_up_costs.get((asset_id, p)) == None):
+                seller_asset_start_up_costs[(asset_id, p)] = 0.0
+            try:    
+                start_up_price = seller_data.loc[(seller_data["Masked Asset ID"] == asset_id) & (seller_data["Trading Interval"] == p)].iloc[0].get("Cold Startup Price")
+                seller_asset_start_up_costs[(asset_id, p)] = float(start_up_price) * float(asset_startup_indicator[(asset_id, p)])
+            # could be, that for one asset one period is not defined... 
+            except Exception:
+                start_up_price = 0.0
+                seller_asset_start_up_costs[(asset_id, p)] = 0.0
+                print("one exception for asset_id: " + str(asset_id) + " and period: " + str(p))
+            
+    
+    print("Optimization finished")
+    #print(seller_asset_energy_produced)
+    #print(seller_asset_asked_earnings)
+    #print(seller_asset_price_based_earnings)
+    
+    # print(asset_startup_indicator)
+    # print(seller_asset_start_up_costs)
+
+
+
+    return 
+
+
 
 
 # Start the main app
